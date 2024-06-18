@@ -239,6 +239,17 @@ func TestNewRuntimeForReplay(t *testing.T) {
 	assert.NotNil(t, runtime)
 }
 
+func TestNewRuntimeForReplaySkipPoA(t *testing.T) {
+	consensus, _ := newTestConsensus()
+	b1 := consensus.parent
+
+	// Test for success scenario
+	runtime, err := consensus.con.NewRuntimeForReplay(b1.Header(), true)
+
+	assert.Nil(t, err)
+	assert.NotNil(t, runtime)
+}
+
 func TestNewRuntimeForReplayWithError(t *testing.T) {
 	consensus, _ := newTestConsensus()
 
@@ -255,6 +266,79 @@ func TestNewRuntimeForReplayWithError(t *testing.T) {
 
 	assert.NotNil(t, err)
 	assert.Nil(t, runtime)
+}
+
+func TestNewRuntimeForReplayWithErrorSkipPoA(t *testing.T) {
+	consensus, _ := newTestConsensus()
+
+	// give invalid parent ID
+	builder := consensus.builder(&block.Header{})
+
+	b1, err := consensus.sign(builder.Timestamp(consensus.parent.Header().Timestamp()))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Test for success scenario
+	runtime, err := consensus.con.NewRuntimeForReplay(b1.Header(), true)
+
+	assert.NotNil(t, err)
+	assert.Nil(t, runtime)
+}
+
+func TestProcessVIP191(t *testing.T) {
+	db := muxdb.NewMem()
+
+	launchTime := uint64(1526400000)
+	gen := new(genesis.Builder).
+		GasLimit(thor.InitialGasLimit).
+		Timestamp(launchTime).
+		State(func(state *state.State) error {
+			bal, _ := new(big.Int).SetString("1000000000000000000000000000", 10)
+			state.SetCode(builtin.Authority.Address, builtin.Authority.RuntimeBytecodes())
+			builtin.Params.Native(state).Set(thor.KeyExecutorAddress, new(big.Int).SetBytes(genesis.DevAccounts()[0].Address[:]))
+			for _, acc := range genesis.DevAccounts() {
+				state.SetBalance(acc.Address, bal)
+				state.SetEnergy(acc.Address, bal, launchTime)
+				builtin.Authority.Native(state).Add(acc.Address, acc.Address, thor.Bytes32{})
+			}
+			return nil
+		})
+
+	stater := state.NewStater(db)
+	parent, _, _, err := gen.Build(stater)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	repo, err := chain.NewRepository(db, parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	forkConfig := thor.NoFork
+	forkConfig.BLOCKLIST = 0
+	forkConfig.VIP214 = 2
+	forkConfig.VIP191 = 0
+
+	proposer := genesis.DevAccounts()[0]
+	p := packer.New(repo, stater, proposer.Address, &proposer.Address, forkConfig)
+	parentSum, _ := repo.GetBlockSummary(parent.Header().ID())
+	flow, err := p.Schedule(parentSum, parent.Header().Timestamp()+100*thor.BlockInterval)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	b1, _, _, err := flow.Pack(proposer.PrivateKey, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	con := New(repo, stater, forkConfig)
+
+	if _, _, err := con.Process(parentSum, b1, flow.When(), 0); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestValidateBlockHeader(t *testing.T) {
